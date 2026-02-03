@@ -123,6 +123,16 @@ def strip_size_suffix(name):
     return name
 
 
+def ensure_size_suffix(name, size):
+    if not size:
+        return name
+    base = strip_size_suffix(name)
+    suffix = f"({size} dydis)"
+    if base.endswith(suffix):
+        return base
+    return f"{base} {suffix}".strip()
+
+
 def replace_placeholders(doc, mapping):
     for paragraph in doc.paragraphs:
         for key, value in mapping.items():
