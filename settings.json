@@ -1,0 +1,9 @@
+{
+  "paths": {
+    "template": "template.docx",
+    "excel": "AAP DB.xlsx",
+    "outputs": "sugeneruotos kortelės",
+    "workplaces_json": "darbo_vietos.json",
+    "gear_json": "aprangos_kodai.json"
+  }
+}
