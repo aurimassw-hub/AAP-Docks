@@ -655,7 +655,8 @@ class NewGearPage(ttk.Frame):
         gear_info = self.controller.gear_codes.get(base)
         if gear_info:
             name = gear_info.get("name", "")
-            name = ensure_size_suffix(name, size)
+            if size:
+                name = f"{name} ({size} dydis)"
             entry["name"].set(name)
             entry["months"].set(str(gear_info.get("months", "")))
         else:
@@ -675,7 +676,9 @@ class NewGearPage(ttk.Frame):
                 base, size = code, ""
             base = base.strip()
             size = size.strip()
-            final_name = ensure_size_suffix(name, size)
+            final_name = name
+            if size and size not in name:
+                final_name = f"{strip_size_suffix(name)} ({size} dydis)"
             try:
                 months_value = int(months)
             except ValueError:
