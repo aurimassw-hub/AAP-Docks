@@ -1,10 +1,9 @@
 {
   "paths": {
-    "template": "AAP kortelės_2025.docx",
-    "excel": "AAP DB.xlsx",
-    "employees_excel": "Darbuotojai.xlsx",
-    "outputs": "sugeneruotos kortelės",
-    "workplaces_json": "darbo_vietos.json",
-    "gear_json": "aprangos_kodai.json"
+    "template": "AAP kortelės_2026 Ligitos.docx",
+    "aap_db": "AAP DB.xlsx",
+    "darbuotojai": "Darbuotojai.xlsx",
+    "gear_excel": "Aprangos kodai.xlsx",
+    "outputs": "sugeneruotos kortelės"
   }
 }
