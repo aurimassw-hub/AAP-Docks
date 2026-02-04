@@ -1,3 +1,8 @@
+# main.py  (UPDATED: Padalinys/Pareigos dropdown from Darbuotojai.xlsx + Issue date selector)
+# Requires: openpyxl, python-docx (not "docx")
+# Optional: none (no tkcalendar)
+
+import importlib.util
 import json
 import os
 import threading
@@ -5,13 +10,16 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox, ttk
 
-from docx import Document
 from openpyxl import Workbook, load_workbook
 
 
-HEADER_COLUMNS = [
+# ---------------------------
+# Excel headers
+# ---------------------------
+
+ISSUANCE_HEADER = [
     "Numeris",
     "Vardas Pavardė",
     "Tab. Nr",
@@ -24,6 +32,13 @@ HEADER_COLUMNS = [
     "Susidėvėjimas",
 ]
 
+# Darbuotojai.xlsx (Vardas, Pavarde, TabNr, Pareigos, Padalinys, Lytis)
+EMP_HEADER = ["Vardas", "Pavarde", "TabNr", "Pareigos", "Padalinys", "Lytis"]
+
+
+# ---------------------------
+# Models
+# ---------------------------
 
 @dataclass
 class EmployeeInfo:
@@ -33,6 +48,10 @@ class EmployeeInfo:
     position: str
     gender: str
 
+
+# ---------------------------
+# Utils
+# ---------------------------
 
 def parse_date(value):
     if value is None:
@@ -52,70 +71,43 @@ def parse_date(value):
 def add_months(start_date, months):
     if start_date is None:
         return None
+    months = int(months or 0)
+    if months <= 0:
+        return None
     month = start_date.month - 1 + months
     year = start_date.year + month // 12
     month = month % 12 + 1
-    day = min(start_date.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    days_in_month = [
+        31,
+        29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+    ][month - 1]
+    day = min(start_date.day, days_in_month)
     return date(year, month, day)
 
 
-def resolve_path(base_path, target):
+def resolve_path(base_path: Path, target: str):
     target_path = Path(target)
     if target_path.is_absolute():
         return target_path
     return (base_path / target_path).resolve()
 
 
-def load_settings(settings_path):
-    with open(settings_path, "r", encoding="utf-8") as file:
-        data = json.load(file)
-    base_dir = Path(settings_path).resolve().parent
-    paths = data.get("paths", {})
-    return {
-        "template": resolve_path(base_dir, paths.get("template", "template.docx")),
-        "excel": resolve_path(base_dir, paths.get("excel", "AAP DB.xlsx")),
-        "outputs": resolve_path(base_dir, paths.get("outputs", "sugeneruotos kortelės")),
-        "workplaces": resolve_path(base_dir, paths.get("workplaces_json", "darbo_vietos.json")),
-        "gear": resolve_path(base_dir, paths.get("gear_json", "aprangos_kodai.json")),
-    }
+def sanitize_filename(name: str) -> str:
+    bad = '<>:"/\\|?*'
+    for ch in bad:
+        name = name.replace(ch, "_")
+    return " ".join(name.split()).strip()
 
 
-def ensure_excel_file(excel_path):
-    if excel_path.exists():
-        return
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(HEADER_COLUMNS)
-    workbook.save(excel_path)
+def python_docx_available():
+    return (
+        importlib.util.find_spec("docx") is not None
+        and importlib.util.find_spec("docx.api") is not None
+    )
 
 
-def load_workplaces(path):
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8") as file:
-        data = json.load(file)
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
-def load_gear_codes(path):
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8") as file:
-        data = json.load(file)
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
-def save_gear_codes(path, codes):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(codes, file, ensure_ascii=False, indent=2)
-
-
-def strip_size_suffix(name):
+def strip_size_suffix(name: str) -> str:
     if not name:
         return ""
     if "(" in name and name.endswith(")"):
@@ -123,7 +115,7 @@ def strip_size_suffix(name):
     return name
 
 
-def ensure_size_suffix(name, size):
+def ensure_size_suffix(name: str, size: str) -> str:
     if not size:
         return name
     base = strip_size_suffix(name)
@@ -133,37 +125,391 @@ def ensure_size_suffix(name, size):
     return f"{base} {suffix}".strip()
 
 
-def replace_placeholders(doc, mapping):
+def split_full_name(full_name: str):
+    s = " ".join((full_name or "").split()).strip()
+    if not s:
+        return "", ""
+    parts = s.split(" ")
+    if len(parts) == 1:
+        return parts[0], ""
+    return " ".join(parts[:-1]), parts[-1]
+
+
+# ---------------------------
+# Settings
+# ---------------------------
+
+def load_settings(settings_path: str):
+    p = Path(settings_path).resolve()
+    base_dir = p.parent
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    paths = data.get("paths", {})
+    return {
+        "template": resolve_path(base_dir, paths.get("template", "AAP kortelės_2025.docx")),
+        "excel": resolve_path(base_dir, paths.get("excel", "AAP DB.xlsx")),
+        "employees_excel": resolve_path(base_dir, paths.get("employees_excel", "Darbuotojai.xlsx")),
+        "outputs": resolve_path(base_dir, paths.get("outputs", "sugeneruotos kortelės")),
+        "gear": resolve_path(base_dir, paths.get("gear_json", "aprangos_kodai.json")),
+        "ui": data.get("ui", {}),
+    }
+
+
+# ---------------------------
+# Excel helpers
+# ---------------------------
+
+def ensure_issuance_excel(excel_path: Path):
+    if excel_path.exists():
+        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "AAP DB"
+    ws.append(ISSUANCE_HEADER)
+    wb.save(excel_path)
+
+
+def ensure_employees_excel(employees_path: Path):
+    if employees_path.exists():
+        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Darbuotojai"
+    ws.append(EMP_HEADER)
+    wb.save(employees_path)
+
+
+def read_employees(employees_path: Path) -> list[dict]:
+    ensure_employees_excel(employees_path)
+    wb = load_workbook(employees_path)
+    ws = wb.active
+
+    out = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not any(row):
+            continue
+        d = dict(zip(EMP_HEADER, row))
+        tab = str(d.get("TabNr", "") or "").strip()
+        if not tab:
+            continue
+        vardas = str(d.get("Vardas", "") or "").strip()
+        pav = str(d.get("Pavarde", "") or "").strip()
+        full = " ".join([x for x in [vardas, pav] if x]).strip()
+
+        out.append({
+            "tab_nr": tab,
+            "name": full,
+            "department": str(d.get("Padalinys", "") or "").strip(),
+            "position": str(d.get("Pareigos", "") or "").strip(),
+            "gender": str(d.get("Lytis", "") or "").strip(),
+        })
+    return out
+
+
+def unique_sorted_values(employees_path: Path, key: str) -> list[str]:
+    """
+    key: 'Padalinys' or 'Pareigos'
+    """
+    ensure_employees_excel(employees_path)
+    wb = load_workbook(employees_path)
+    ws = wb.active
+
+    idx = EMP_HEADER.index(key) + 1
+    vals = set()
+    for r in range(2, ws.max_row + 1):
+        v = str(ws.cell(r, idx).value or "").strip()
+        if v:
+            vals.add(v)
+    return sorted(vals, key=lambda s: s.lower())
+
+
+def upsert_employee(employees_path: Path, emp: EmployeeInfo):
+    ensure_employees_excel(employees_path)
+    wb = load_workbook(employees_path)
+    ws = wb.active
+
+    target_row = None
+    for r in range(2, ws.max_row + 1):
+        tab = str(ws.cell(r, 3).value or "").strip()  # TabNr col=3
+        if tab == emp.tab_nr:
+            target_row = r
+            break
+
+    vardas, pavarde = split_full_name(emp.name)
+
+    if target_row is None:
+        ws.append([vardas, pavarde, emp.tab_nr, emp.position, emp.department, emp.gender])
+    else:
+        ws.cell(target_row, 1, vardas)
+        ws.cell(target_row, 2, pavarde)
+        ws.cell(target_row, 3, emp.tab_nr)
+        ws.cell(target_row, 4, emp.position)
+        ws.cell(target_row, 5, emp.department)
+        ws.cell(target_row, 6, emp.gender)
+
+    wb.save(employees_path)
+
+
+def read_issuance_rows(excel_path: Path) -> list[dict]:
+    ensure_issuance_excel(excel_path)
+    wb = load_workbook(excel_path)
+    ws = wb.active
+
+    rows = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not any(row):
+            continue
+        rows.append(dict(zip(ISSUANCE_HEADER, row)))
+    return rows
+
+
+def next_document_number(excel_path: Path) -> int:
+    rows = read_issuance_rows(excel_path)
+    mx = 0
+    for r in rows:
+        v = r.get("Numeris")
+        if v in (None, ""):
+            continue
+        try:
+            mx = max(mx, int(v))
+        except Exception:
+            continue
+    return mx + 1
+
+
+def insert_issuance_rows(excel_path: Path, emp: EmployeeInfo, items: list[dict], doc_number: int, issued_date: date):
+    ensure_issuance_excel(excel_path)
+    wb = load_workbook(excel_path)
+    ws = wb.active
+
+    issued_str = issued_date.isoformat()
+
+    for it in reversed(items):
+        ws.insert_rows(2)
+        ws.cell(2, 1, doc_number)
+        ws.cell(2, 2, emp.name)
+        ws.cell(2, 3, emp.tab_nr)
+        ws.cell(2, 4, emp.department)
+        ws.cell(2, 5, emp.position)
+        ws.cell(2, 6, emp.gender)
+        ws.cell(2, 7, it["code"])
+        ws.cell(2, 8, it["name"])
+        ws.cell(2, 9, issued_str)
+        ws.cell(2, 10, it["months"])
+
+    wb.save(excel_path)
+
+
+# ---------------------------
+# Gear codes JSON
+# ---------------------------
+
+def load_gear_codes(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def save_gear_codes(path: Path, codes: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(codes, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------
+# Word
+# ---------------------------
+
+def replace_placeholders(doc, mapping: dict):
     for paragraph in doc.paragraphs:
-        for key, value in mapping.items():
-            if key in paragraph.text:
-                for run in paragraph.runs:
-                    run.text = run.text.replace(key, value)
+        for run in paragraph.runs:
+            t = run.text
+            if not t:
+                continue
+            for k, v in mapping.items():
+                if k in t:
+                    t = t.replace(k, v)
+            run.text = t
+
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    for key, value in mapping.items():
-                        if key in paragraph.text:
-                            for run in paragraph.runs:
-                                run.text = run.text.replace(key, value)
+                    for run in paragraph.runs:
+                        t = run.text
+                        if not t:
+                            continue
+                        for k, v in mapping.items():
+                            if k in t:
+                                t = t.replace(k, v)
+                        run.text = t
 
+
+def pick_gear_table(doc):
+    return doc.tables[0] if doc.tables else None
+
+
+def generate_word(template_path: Path, outputs_dir: Path, emp: EmployeeInfo, items: list[dict], doc_number: int, issued_date: date):
+    if not python_docx_available():
+        messagebox.showerror(
+            "Trūksta priklausomybių",
+            "Nerastas python-docx. Įdiek 'python-docx' ir pašalink paketą 'docx'."
+        )
+        return None
+
+    from docx import Document
+
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    doc = Document(str(template_path))
+
+    replace_placeholders(doc, {
+        "{Employee}": emp.name,
+        "{Emploee}": emp.name,
+        "{Departament}": emp.department,
+        "{Position}": emp.position,
+    })
+
+    tbl = pick_gear_table(doc)
+    if tbl is not None:
+        while len(tbl.rows) > 1:
+            tbl._tbl.remove(tbl.rows[1]._tr)
+
+        for it in items[:14]:
+            r = tbl.add_row()
+            c = r.cells
+            change_date = add_months(issued_date, it["months"])
+            c[0].text = issued_date.strftime("%Y-%m-%d")
+            c[1].text = str(it["code"])
+            c[2].text = str(it["name"])
+            c[3].text = str(it["months"])
+            c[4].text = change_date.strftime("%Y-%m-%d") if change_date else ""
+            c[5].text = "__"
+
+    filename = sanitize_filename(f"AAP {doc_number} {emp.name}.docx")
+    out_path = outputs_dir / filename
+    doc.save(str(out_path))
+    return out_path
+
+
+# ---------------------------
+# UI widgets: searchable combobox
+# ---------------------------
+
+class SearchableCombobox(ttk.Frame):
+    """
+    Entry + Listbox dropdown (searchable).
+    Use get() / set() like a combobox.
+    """
+    def __init__(self, parent, values=None, width=42):
+        super().__init__(parent)
+        self.values = values or []
+        self.var = tk.StringVar()
+
+        self.entry = ttk.Entry(self, textvariable=self.var, width=width)
+        self.entry.pack(fill="x")
+
+        self.popup = None
+        self.listbox = None
+
+        self.entry.bind("<KeyRelease>", self._on_key)
+        self.entry.bind("<Button-1>", self._show_popup)
+        self.entry.bind("<Down>", self._show_popup)
+        self.entry.bind("<FocusOut>", self._on_focus_out)
+
+    def set_values(self, values):
+        self.values = values or []
+        self._refresh_list(self.var.get())
+
+    def get(self):
+        return self.var.get().strip()
+
+    def set(self, value):
+        self.var.set(value or "")
+
+    def _on_focus_out(self, _ev):
+        # close popup if click outside
+        self.after(150, self._hide_popup)
+
+    def _on_key(self, _ev):
+        self._show_popup()
+        self._refresh_list(self.var.get())
+
+    def _show_popup(self, _ev=None):
+        if self.popup and self.popup.winfo_exists():
+            return
+
+        self.popup = tk.Toplevel(self)
+        self.popup.wm_overrideredirect(True)
+        self.popup.attributes("-topmost", True)
+
+        x = self.entry.winfo_rootx()
+        y = self.entry.winfo_rooty() + self.entry.winfo_height()
+        self.popup.geometry(f"{self.entry.winfo_width()}x200+{x}+{y}")
+
+        self.listbox = tk.Listbox(self.popup, height=10)
+        self.listbox.pack(fill="both", expand=True)
+
+        self.listbox.bind("<ButtonRelease-1>", self._choose)
+        self.listbox.bind("<Return>", self._choose)
+
+        self._refresh_list(self.var.get())
+
+    def _hide_popup(self):
+        if self.popup and self.popup.winfo_exists():
+            self.popup.destroy()
+        self.popup = None
+        self.listbox = None
+
+    def _refresh_list(self, query):
+        if not (self.popup and self.listbox):
+            return
+        q = (query or "").strip().lower()
+        self.listbox.delete(0, tk.END)
+        for v in self.values:
+            if not q or q in v.lower():
+                self.listbox.insert(tk.END, v)
+
+    def _choose(self, _ev=None):
+        if not self.listbox:
+            return
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        value = self.listbox.get(sel[0])
+        self.var.set(value)
+        self._hide_popup()
+        self.entry.focus_set()
+
+
+# ---------------------------
+# App
+# ---------------------------
 
 class AAPApp(tk.Tk):
-    def __init__(self, settings_path):
+    def __init__(self, settings_path: str):
         super().__init__()
+
         self.settings = load_settings(settings_path)
-        ensure_excel_file(self.settings["excel"])
-        self.workplaces = load_workplaces(self.settings["workplaces"])
+        ensure_issuance_excel(self.settings["excel"])
+        ensure_employees_excel(self.settings["employees_excel"])
         self.gear_codes = load_gear_codes(self.settings["gear"])
 
-        self.current_employee = None
+        self.current_employee: EmployeeInfo | None = None
         self.change_mode = False
+        self.issue_date_for_new_employee: date | None = None
 
-        self.title("AAP Issuance")
-        self.geometry("900x650")
+        self.title(self.settings.get("ui", {}).get("title", "AAP Issuance"))
+        w = int(self.settings.get("ui", {}).get("width", 900))
+        h = int(self.settings.get("ui", {}).get("height", 650))
+        self.geometry(f"{w}x{h}")
         self.resizable(False, False)
-        self.center_window()
+
+        if self.settings.get("ui", {}).get("center_on_screen", True):
+            self.center_window()
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
@@ -184,549 +530,550 @@ class AAPApp(tk.Tk):
         y = (self.winfo_screenheight() // 2) - (height // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
-    def show_page(self, page_name):
-        page = self.pages[page_name]
+    def show_page(self, name: str):
+        page = self.pages[name]
         if hasattr(page, "refresh"):
             page.refresh()
         page.tkraise()
 
-    def load_employee_rows(self):
-        workbook = load_workbook(self.settings["excel"])
-        sheet = workbook.active
-        rows = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            if not any(row):
-                continue
-            row_data = dict(zip(HEADER_COLUMNS, row))
-            rows.append(row_data)
-        return rows
+    # Data wrappers
+    def list_employees(self) -> list[dict]:
+        return read_employees(self.settings["employees_excel"])
 
-    def find_latest_employee_info(self, tab_nr):
-        rows = self.load_employee_rows()
-        filtered = [row for row in rows if str(row.get("Tab. Nr", "")).strip() == tab_nr]
-        latest = None
-        latest_date = None
-        for row in filtered:
-            issued = parse_date(row.get("Išduota"))
-            if issued and (latest_date is None or issued > latest_date):
-                latest_date = issued
-                latest = row
-        if latest is None:
-            return None
-        return EmployeeInfo(
-            tab_nr=str(latest.get("Tab. Nr", "")),
-            name=str(latest.get("Vardas Pavardė", "")),
-            department=str(latest.get("Padalinys", "")),
-            position=str(latest.get("Pareigos", "")),
-            gender=str(latest.get("Lytis", "")),
-        )
+    def upsert_employee(self, emp: EmployeeInfo):
+        upsert_employee(self.settings["employees_excel"], emp)
 
-    def insert_workplace_change(self, employee_info):
-        workbook = load_workbook(self.settings["excel"])
-        sheet = workbook.active
-        sheet.insert_rows(2)
-        values = [
-            "",
-            employee_info.name,
-            employee_info.tab_nr,
-            employee_info.department,
-            employee_info.position,
-            employee_info.gender,
-            "",
-            "",
-            date.today().isoformat(),
-            "",
-        ]
-        for col, value in enumerate(values, start=1):
-            sheet.cell(row=2, column=col, value=value)
-        workbook.save(self.settings["excel"])
+    def list_departments(self) -> list[str]:
+        return unique_sorted_values(self.settings["employees_excel"], "Padalinys")
 
-    def get_next_document_number(self):
-        rows = self.load_employee_rows()
-        numbers = []
-        for row in rows:
-            value = row.get("Numeris")
-            if value is None or value == "":
-                continue
-            try:
-                numbers.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        return max(numbers, default=0) + 1
+    def list_positions(self) -> list[str]:
+        return unique_sorted_values(self.settings["employees_excel"], "Pareigos")
 
-    def append_issuance_rows(self, employee_info, issued_items, document_number):
-        workbook = load_workbook(self.settings["excel"])
-        sheet = workbook.active
-        issued_date = date.today().isoformat()
-        for item in reversed(issued_items):
-            sheet.insert_rows(2)
-            values = [
-                document_number,
-                employee_info.name,
-                employee_info.tab_nr,
-                employee_info.department,
-                employee_info.position,
-                employee_info.gender,
-                item["code"],
-                item["name"],
-                issued_date,
-                item["months"],
-            ]
-            for col, value in enumerate(values, start=1):
-                sheet.cell(row=2, column=col, value=value)
-        workbook.save(self.settings["excel"])
+    def issuance_rows_for(self, tab_nr: str) -> list[dict]:
+        rows = read_issuance_rows(self.settings["excel"])
+        return [r for r in rows if str(r.get("Tab. Nr", "")).strip() == tab_nr]
 
-    def generate_word_doc(self, employee_info, issued_items, document_number):
-        template_path = self.settings["template"]
-        output_dir = self.settings["outputs"]
-        output_dir.mkdir(parents=True, exist_ok=True)
-        doc = Document(template_path)
-        replace_placeholders(
-            doc,
-            {
-                "{Employee}": employee_info.name,
-                "{Emploee}": employee_info.name,
-                "{Departament}": employee_info.department,
-                "{Position}": employee_info.position,
-            },
-        )
-        if doc.tables:
-            table = doc.tables[0]
-            while len(table.rows) > 1:
-                table._tbl.remove(table.rows[1]._tr)
-            for item in issued_items[:14]:
-                row = table.add_row()
-                issued_date = date.today()
-                change_date = add_months(issued_date, int(item["months"]))
-                cells = row.cells
-                cells[0].text = issued_date.strftime("%Y-%m-%d")
-                cells[1].text = item["code"]
-                cells[2].text = item["name"]
-                cells[3].text = str(item["months"])
-                cells[4].text = change_date.strftime("%Y-%m-%d") if change_date else ""
-                cells[5].text = "__"
-        filename = f"AAP {document_number} {employee_info.name}.docx"
-        output_path = output_dir / filename
-        doc.save(output_path)
+    def get_next_doc_number(self) -> int:
+        return next_document_number(self.settings["excel"])
 
+    def save_issuance(self, emp: EmployeeInfo, items: list[dict], doc_number: int, issued_date: date):
+        insert_issuance_rows(self.settings["excel"], emp, items, doc_number, issued_date)
+
+
+# ---------------------------
+# Pages
+# ---------------------------
 
 class EmployeeSelectPage(ttk.Frame):
-    def __init__(self, parent, controller):
+    def __init__(self, parent, app: AAPApp):
         super().__init__(parent)
-        self.controller = controller
+        self.app = app
 
         ttk.Label(self, text="Darbuotojo paieška", font=("Arial", 16)).pack(pady=10)
 
-        search_frame = ttk.Frame(self)
-        search_frame.pack(fill="x", padx=20)
-        ttk.Label(search_frame, text="Paieška:").pack(side="left")
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=20)
+
+        ttk.Label(top, text="Paieška (TabNr / vardas / pavardė):").pack(side="left")
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.refresh_list())
-        ttk.Entry(search_frame, textvariable=self.search_var, width=40).pack(side="left", padx=5)
+        ttk.Entry(top, textvariable=self.search_var, width=40).pack(side="left", padx=8)
 
         list_frame = ttk.Frame(self)
         list_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
         self.listbox = tk.Listbox(list_frame, height=18)
         self.listbox.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, command=self.listbox.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.listbox.config(yscrollcommand=scrollbar.set)
+        sb = ttk.Scrollbar(list_frame, command=self.listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=sb.set)
 
-        button_frame = ttk.Frame(self)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Toliau", command=self.on_next).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Naujas darbuotojas", command=self.on_new).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Keisti padalinį", command=self.on_change).pack(side="left", padx=5)
+        btns = ttk.Frame(self)
+        btns.pack(pady=10)
 
-        self.employees = []
+        ttk.Button(btns, text="Toliau", command=self.on_next).pack(side="left", padx=5)
+        ttk.Button(btns, text="Naujas darbuotojas", command=self.on_new).pack(side="left", padx=5)
+        ttk.Button(btns, text="Keisti padalinį", command=self.on_change).pack(side="left", padx=5)
+
+        self.items = []
 
     def refresh(self):
         self.refresh_list()
 
     def refresh_list(self):
-        rows = self.controller.load_employee_rows()
-        latest_by_tab = {}
-        for row in rows:
-            tab_nr = str(row.get("Tab. Nr", "")).strip()
-            if not tab_nr:
-                continue
-            issued = parse_date(row.get("Išduota"))
-            existing = latest_by_tab.get(tab_nr)
-            if existing is None or (issued and issued > existing["date"]):
-                latest_by_tab[tab_nr] = {"row": row, "date": issued or date.min}
-
-        search_text = self.search_var.get().strip().lower()
-        self.employees = []
         self.listbox.delete(0, tk.END)
-        for tab_nr, info in sorted(latest_by_tab.items(), key=lambda x: x[0]):
-            row = info["row"]
-            name = str(row.get("Vardas Pavardė", "")).strip()
-            display = f"{tab_nr} — {name}"
-            if search_text and search_text not in tab_nr.lower() and search_text not in name.lower():
-                continue
-            self.employees.append({"tab_nr": tab_nr, "name": name})
-            self.listbox.insert(tk.END, display)
+        self.items = []
 
-    def get_selected_employee(self):
-        selection = self.listbox.curselection()
-        if not selection:
+        emps = self.app.list_employees()
+        q = self.search_var.get().strip().lower()
+
+        for e in sorted(emps, key=lambda x: (x["name"].lower(), x["tab_nr"])):
+            tab = e["tab_nr"]
+            nm = e["name"]
+            if q and (q not in tab.lower() and q not in nm.lower()):
+                continue
+            self.items.append(e)
+            self.listbox.insert(tk.END, f"{tab} — {nm}")
+
+    def selected(self):
+        sel = self.listbox.curselection()
+        if not sel:
             return None
-        return self.employees[selection[0]]
+        return self.items[sel[0]]
 
     def on_next(self):
-        selected = self.get_selected_employee()
-        if not selected:
+        s = self.selected()
+        if not s:
             messagebox.showwarning("Pasirinkimas", "Pasirinkite darbuotoją iš sąrašo.")
             return
-        info = self.controller.find_latest_employee_info(selected["tab_nr"])
-        if info is None:
-            messagebox.showwarning("Klaida", "Nepavyko rasti darbuotojo informacijos.")
-            return
-        self.controller.current_employee = info
-        self.controller.change_mode = False
-        self.controller.show_page("CurrentGearPage")
+
+        self.app.current_employee = EmployeeInfo(
+            tab_nr=s["tab_nr"],
+            name=s["name"],
+            department=s.get("department", ""),
+            position=s.get("position", ""),
+            gender=s.get("gender", "") or "Vyras",
+        )
+        self.app.change_mode = False
+        self.app.issue_date_for_new_employee = None
+        self.app.show_page("CurrentGearPage")
 
     def on_new(self):
-        self.controller.current_employee = None
-        self.controller.change_mode = False
-        self.controller.show_page("EmployeeInfoPage")
+        self.app.current_employee = None
+        self.app.change_mode = False
+        self.app.issue_date_for_new_employee = date.today()
+        self.app.show_page("EmployeeInfoPage")
 
     def on_change(self):
-        selected = self.get_selected_employee()
-        if not selected:
+        s = self.selected()
+        if not s:
             messagebox.showwarning("Pasirinkimas", "Pasirinkite darbuotoją iš sąrašo.")
             return
-        info = self.controller.find_latest_employee_info(selected["tab_nr"])
-        if info is None:
-            messagebox.showwarning("Klaida", "Nepavyko rasti darbuotojo informacijos.")
-            return
-        self.controller.current_employee = info
-        self.controller.change_mode = True
-        self.controller.show_page("EmployeeInfoPage")
+
+        self.app.current_employee = EmployeeInfo(
+            tab_nr=s["tab_nr"],
+            name=s["name"],
+            department=s.get("department", ""),
+            position=s.get("position", ""),
+            gender=s.get("gender", "") or "Vyras",
+        )
+        self.app.change_mode = True
+        self.app.issue_date_for_new_employee = None
+        self.app.show_page("EmployeeInfoPage")
 
 
 class EmployeeInfoPage(ttk.Frame):
-    def __init__(self, parent, controller):
+    def __init__(self, parent, app: AAPApp):
         super().__init__(parent)
-        self.controller = controller
+        self.app = app
 
         ttk.Label(self, text="Darbuotojo informacija", font=("Arial", 16)).pack(pady=10)
 
-        form_frame = ttk.Frame(self)
-        form_frame.pack(pady=10)
+        form = ttk.Frame(self)
+        form.pack(pady=10)
 
         self.tab_var = tk.StringVar()
         self.name_var = tk.StringVar()
-        self.gender_var = tk.StringVar()
-        self.dept_var = tk.StringVar()
-        self.pos_var = tk.StringVar()
+        self.gender_var = tk.StringVar(value="Vyras")
 
-        self.create_field(form_frame, "Tab. Nr:", self.tab_var, 0)
-        self.create_field(form_frame, "Vardas Pavardė:", self.name_var, 1)
-        self.create_combo(form_frame, "Lytis:", self.gender_var, ["Vyras", "Moteris"], 2)
-        self.create_combo(form_frame, "Padalinys:", self.dept_var, list(self.controller.workplaces.keys()), 3)
-        self.create_combo(form_frame, "Pareigos:", self.pos_var, [], 4)
+        # searchable dropdowns (from Darbuotojai.xlsx)
+        self.dept_picker = SearchableCombobox(form, values=[], width=45)
+        self.pos_picker = SearchableCombobox(form, values=[], width=45)
 
-        self.dept_var.trace_add("write", lambda *_: self.update_positions())
+        # issue date selection (only for NEW employee)
+        self.issue_year = tk.StringVar()
+        self.issue_month = tk.StringVar()
+        self.issue_day = tk.StringVar()
+        self.issue_date_frame = ttk.Frame(form)
 
-        button_frame = ttk.Frame(self)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Atgal", command=lambda: controller.show_page("EmployeeSelectPage")).pack(side="left", padx=5)
-        self.next_button = ttk.Button(button_frame, text="Toliau", command=self.on_next)
-        self.next_button.pack(side="left", padx=5)
+        ttk.Label(form, text="Tab. Nr:").grid(row=0, column=0, sticky="e", padx=5, pady=6)
+        self.tab_entry = ttk.Entry(form, textvariable=self.tab_var, width=48)
+        self.tab_entry.grid(row=0, column=1, sticky="w", padx=5, pady=6)
 
-    def create_field(self, parent, label, var, row):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", pady=5, padx=5)
-        entry = ttk.Entry(parent, textvariable=var, width=40)
-        entry.grid(row=row, column=1, sticky="w", pady=5)
+        ttk.Label(form, text="Vardas Pavardė:").grid(row=1, column=0, sticky="e", padx=5, pady=6)
+        self.name_entry = ttk.Entry(form, textvariable=self.name_var, width=48)
+        self.name_entry.grid(row=1, column=1, sticky="w", padx=5, pady=6)
 
-    def create_combo(self, parent, label, var, values, row):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", pady=5, padx=5)
-        combo = ttk.Combobox(parent, textvariable=var, values=values, state="readonly", width=37)
-        combo.grid(row=row, column=1, sticky="w", pady=5)
+        ttk.Label(form, text="Lytis:").grid(row=2, column=0, sticky="e", padx=5, pady=6)
+        self.gender_combo = ttk.Combobox(
+            form,
+            textvariable=self.gender_var,
+            values=["Vyras", "Moteris"],
+            state="readonly",
+            width=45
+        )
+        self.gender_combo.grid(row=2, column=1, sticky="w", padx=5, pady=6)
 
-    def update_positions(self):
-        dept = self.dept_var.get()
-        positions = self.controller.workplaces.get(dept, [])
-        pos_combo = self.children["!frame"].children["!combobox2"]
-        pos_combo["values"] = positions
-        if positions:
-            self.pos_var.set(positions[0])
-        else:
-            self.pos_var.set("")
+        ttk.Label(form, text="Padalinys:").grid(row=3, column=0, sticky="e", padx=5, pady=6)
+        self.dept_picker.grid(row=3, column=1, sticky="w", padx=5, pady=6)
+
+        ttk.Label(form, text="Pareigos:").grid(row=4, column=0, sticky="e", padx=5, pady=6)
+        self.pos_picker.grid(row=4, column=1, sticky="w", padx=5, pady=6)
+
+        # issue date row (row=5) created once
+        ttk.Label(form, text="Išdavimo data:").grid(row=5, column=0, sticky="e", padx=5, pady=6)
+        self.issue_date_frame.grid(row=5, column=1, sticky="w", padx=5, pady=6)
+
+        self._build_issue_date_controls()
+
+        btns = ttk.Frame(self)
+        btns.pack(pady=10)
+
+        ttk.Button(btns, text="Atgal", command=lambda: self.app.show_page("EmployeeSelectPage")).pack(side="left", padx=5)
+        self.next_btn = ttk.Button(btns, text="Toliau", command=self.on_next)
+        self.next_btn.pack(side="left", padx=5)
+
+    def _build_issue_date_controls(self):
+        # YYYY / MM / DD comboboxes
+        today = date.today()
+        years = [str(y) for y in range(today.year - 2, today.year + 3)]
+        months = [f"{m:02d}" for m in range(1, 13)]
+        days = [f"{d:02d}" for d in range(1, 32)]
+
+        self.issue_year.set(str(today.year))
+        self.issue_month.set(f"{today.month:02d}")
+        self.issue_day.set(f"{today.day:02d}")
+
+        self.year_combo = ttk.Combobox(self.issue_date_frame, textvariable=self.issue_year, values=years, width=6, state="readonly")
+        self.month_combo = ttk.Combobox(self.issue_date_frame, textvariable=self.issue_month, values=months, width=4, state="readonly")
+        self.day_combo = ttk.Combobox(self.issue_date_frame, textvariable=self.issue_day, values=days, width=4, state="readonly")
+
+        self.year_combo.pack(side="left")
+        ttk.Label(self.issue_date_frame, text="-").pack(side="left", padx=2)
+        self.month_combo.pack(side="left")
+        ttk.Label(self.issue_date_frame, text="-").pack(side="left", padx=2)
+        self.day_combo.pack(side="left")
+
+        ttk.Button(self.issue_date_frame, text="Šiandien", command=self._set_today).pack(side="left", padx=8)
+
+    def _set_today(self):
+        t = date.today()
+        self.issue_year.set(str(t.year))
+        self.issue_month.set(f"{t.month:02d}")
+        self.issue_day.set(f"{t.day:02d}")
+
+    def _get_issue_date(self) -> date:
+        try:
+            y = int(self.issue_year.get())
+            m = int(self.issue_month.get())
+            d = int(self.issue_day.get())
+            return date(y, m, d)
+        except Exception:
+            return date.today()
 
     def refresh(self):
-        info = self.controller.current_employee
+        # refresh dropdown values from Darbuotojai.xlsx each time
+        depts = self.app.list_departments()
+        poss = self.app.list_positions()
+        self.dept_picker.set_values(depts)
+        self.pos_picker.set_values(poss)
+
+        info = self.app.current_employee
         if info:
             self.tab_var.set(info.tab_nr)
             self.name_var.set(info.name)
             self.gender_var.set(info.gender or "Vyras")
-            self.dept_var.set(info.department)
-            self.pos_var.set(info.position)
+            self.dept_picker.set(info.department or "")
+            self.pos_picker.set(info.position or "")
         else:
             self.tab_var.set("")
             self.name_var.set("")
             self.gender_var.set("Vyras")
-            self.dept_var.set("")
-            self.pos_var.set("")
+            self.dept_picker.set("")
+            self.pos_picker.set("")
 
-        if self.controller.change_mode:
-            self.next_button.config(text="Išsaugoti")
-            self.children["!frame"].children["!entry"].config(state="disabled")
-            self.children["!frame"].children["!entry2"].config(state="disabled")
+        if self.app.change_mode:
+            self.next_btn.config(text="Išsaugoti")
+            self.tab_entry.config(state="disabled")
+            self.name_entry.config(state="disabled")
+            # issue date hidden when editing existing employee
+            self.issue_date_frame.grid_remove()
         else:
-            self.next_button.config(text="Toliau")
-            self.children["!frame"].children["!entry"].config(state="normal")
-            self.children["!frame"].children["!entry2"].config(state="normal")
+            self.next_btn.config(text="Toliau")
+            self.tab_entry.config(state="normal")
+            self.name_entry.config(state="normal")
+            # issue date visible for NEW employee creation
+            self.issue_date_frame.grid()
+
+            # if app has pre-set date, apply it
+            if self.app.issue_date_for_new_employee:
+                t = self.app.issue_date_for_new_employee
+                self.issue_year.set(str(t.year))
+                self.issue_month.set(f"{t.month:02d}")
+                self.issue_day.set(f"{t.day:02d}")
 
     def on_next(self):
-        tab_nr = self.tab_var.get().strip()
-        name = self.name_var.get().strip()
-        if not tab_nr or not name:
-            messagebox.showwarning("Trūksta duomenų", "Įveskite Tab. Nr ir vardą pavardę.")
+        tab = self.tab_var.get().strip()
+        name = " ".join(self.name_var.get().split()).strip()
+        if not tab or not name:
+            messagebox.showwarning("Trūksta duomenų", "Įveskite Tab. Nr ir Vardas Pavardė.")
             return
-        employee_info = EmployeeInfo(
-            tab_nr=tab_nr,
-            name=name,
-            department=self.dept_var.get().strip(),
-            position=self.pos_var.get().strip(),
-            gender=self.gender_var.get().strip(),
-        )
-        self.controller.current_employee = employee_info
-        if self.controller.change_mode:
-            self.controller.insert_workplace_change(employee_info)
-            self.controller.change_mode = False
-            self.controller.show_page("EmployeeSelectPage")
+
+        dept = self.dept_picker.get()
+        pos = self.pos_picker.get()
+        gen = self.gender_var.get().strip()
+
+        if not dept or not pos:
+            messagebox.showwarning("Trūksta duomenų", "Pasirinkite Padalinį ir Pareigas.")
+            return
+
+        emp = EmployeeInfo(tab_nr=tab, name=name, department=dept, position=pos, gender=gen)
+        self.app.upsert_employee(emp)
+        self.app.current_employee = emp
+
+        if self.app.change_mode:
+            self.app.change_mode = False
+            self.app.show_page("EmployeeSelectPage")
         else:
-            self.controller.show_page("CurrentGearPage")
+            # store chosen issuance date for subsequent steps
+            self.app.issue_date_for_new_employee = self._get_issue_date()
+            self.app.show_page("CurrentGearPage")
 
 
 class CurrentGearPage(ttk.Frame):
-    def __init__(self, parent, controller):
+    def __init__(self, parent, app: AAPApp):
         super().__init__(parent)
-        self.controller = controller
+        self.app = app
 
         ttk.Label(self, text="Dabartinė apranga", font=("Arial", 16)).pack(pady=10)
 
         self.tree = ttk.Treeview(
             self,
-            columns=("Apranga", "Kodas", "Išduota", "Susidėvėjimas", "Keisti iki", "Likę"),
+            columns=("Apranga", "Kodas", "Išduota", "Susidėvėjimas", "Keisti iki", "Likę (d.)"),
             show="headings",
             height=15,
         )
         for col in self.tree["columns"]:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=130)
+            self.tree.column(col, width=140)
         self.tree.pack(padx=20, pady=10, fill="x")
 
-        button_frame = ttk.Frame(self)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Atgal", command=lambda: controller.show_page("EmployeeSelectPage")).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Toliau → (nauja įranga)", command=lambda: controller.show_page("NewGearPage")).pack(side="left", padx=5)
+        btns = ttk.Frame(self)
+        btns.pack(pady=10)
+
+        ttk.Button(btns, text="Atgal", command=lambda: self.app.show_page("EmployeeSelectPage")).pack(side="left", padx=5)
+        ttk.Button(btns, text="Toliau → (nauja įranga)", command=lambda: self.app.show_page("NewGearPage")).pack(side="left", padx=5)
+
+        self.tree.tag_configure("warn", foreground="red")
 
     def refresh(self):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
-        employee = self.controller.current_employee
-        if employee is None:
-            return
-        rows = self.controller.load_employee_rows()
-        relevant = [row for row in rows if str(row.get("Tab. Nr", "")).strip() == employee.tab_nr]
-        latest_info = None
-        latest_date = None
-        for row in relevant:
-            issued = parse_date(row.get("Išduota"))
-            if issued and (latest_date is None or issued > latest_date):
-                latest_date = issued
-                latest_info = row
-        if latest_info:
-            employee.department = str(latest_info.get("Padalinys", ""))
-            employee.position = str(latest_info.get("Pareigos", ""))
-            employee.gender = str(latest_info.get("Lytis", ""))
+        for r in self.tree.get_children():
+            self.tree.delete(r)
 
+        emp = self.app.current_employee
+        if emp is None:
+            return
+
+        rows = self.app.issuance_rows_for(emp.tab_nr)
         filtered = [
-            row
-            for row in relevant
-            if str(row.get("Padalinys", "")) == employee.department
-            and str(row.get("Pareigos", "")) == employee.position
+            r for r in rows
+            if str(r.get("Padalinys", "") or "").strip() == emp.department
+            and str(r.get("Pareigos", "") or "").strip() == emp.position
         ]
 
         latest_by_item = {}
-        for row in filtered:
-            name = str(row.get("Apranga", ""))
-            if not name:
+        for r in filtered:
+            gear_name = str(r.get("Apranga", "") or "").strip()
+            if not gear_name:
                 continue
-            base_name = strip_size_suffix(name)
-            issued = parse_date(row.get("Išduota"))
+            key = strip_size_suffix(gear_name)
+            issued = parse_date(r.get("Išduota"))
             if issued is None:
                 continue
-            existing = latest_by_item.get(base_name)
-            if existing is None or issued > existing["issued"]:
-                latest_by_item[base_name] = {"row": row, "issued": issued}
+            cur = latest_by_item.get(key)
+            if cur is None or issued > cur["issued"]:
+                latest_by_item[key] = {"row": r, "issued": issued}
 
         today = date.today()
-        for item in latest_by_item.values():
-            row = item["row"]
-            issued = parse_date(row.get("Išduota"))
-            months = int(row.get("Susidėvėjimas") or 0)
+        for v in latest_by_item.values():
+            r = v["row"]
+            issued = v["issued"]
+            months = int(r.get("Susidėvėjimas") or 0)
             change_date = add_months(issued, months)
             remaining = (change_date - today).days if change_date else ""
-            values = (
-                row.get("Apranga", ""),
-                row.get("Aprangos kodas", ""),
-                issued.strftime("%Y-%m-%d") if issued else "",
+
+            item_id = self.tree.insert("", tk.END, values=(
+                str(r.get("Apranga", "") or ""),
+                str(r.get("Aprangos kodas", "") or ""),
+                issued.strftime("%Y-%m-%d"),
                 months,
                 change_date.strftime("%Y-%m-%d") if change_date else "",
                 remaining,
-            )
-            item_id = self.tree.insert("", tk.END, values=values)
+            ))
             if isinstance(remaining, int) and remaining < 7:
                 self.tree.item(item_id, tags=("warn",))
-        self.tree.tag_configure("warn", foreground="red")
 
 
 class NewGearPage(ttk.Frame):
-    def __init__(self, parent, controller):
+    def __init__(self, parent, app: AAPApp):
         super().__init__(parent)
-        self.controller = controller
-        ttk.Label(self, text="Nauja apranga", font=("Arial", 16)).pack(pady=10)
+        self.app = app
+
+        ttk.Label(self, text="Nauja apranga (Excel tipo lentelė)", font=("Arial", 16)).pack(pady=10)
 
         header = ttk.Frame(self)
         header.pack()
-        ttk.Label(header, text="Kodas", width=20).grid(row=0, column=0)
-        ttk.Label(header, text="Apranga", width=40).grid(row=0, column=1)
-        ttk.Label(header, text="Susidėvėjimas (mėn.)", width=20).grid(row=0, column=2)
+        ttk.Label(header, text="Kodas", width=20).grid(row=0, column=0, padx=2)
+        ttk.Label(header, text="Apranga", width=50).grid(row=0, column=1, padx=2)
+        ttk.Label(header, text="Susidėvėjimas (mėn.)", width=20).grid(row=0, column=2, padx=2)
+
+        grid = ttk.Frame(self)
+        grid.pack(pady=6)
 
         self.entries = []
         self.after_ids = {}
-        grid = ttk.Frame(self)
-        grid.pack(pady=5)
 
         for i in range(14):
             code_var = tk.StringVar()
             name_var = tk.StringVar()
             months_var = tk.StringVar()
-            code_entry = ttk.Entry(grid, textvariable=code_var, width=20)
-            name_entry = ttk.Entry(grid, textvariable=name_var, width=40)
-            months_entry = ttk.Entry(grid, textvariable=months_var, width=20)
-            code_entry.grid(row=i, column=0, padx=2, pady=2)
-            name_entry.grid(row=i, column=1, padx=2, pady=2)
-            months_entry.grid(row=i, column=2, padx=2, pady=2)
-            code_entry.bind("<KeyRelease>", lambda event, idx=i: self.on_code_change(idx))
-            self.entries.append({
-                "code": code_var,
-                "name": name_var,
-                "months": months_var,
-                "code_entry": code_entry,
-            })
 
-        button_frame = ttk.Frame(self)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Atgal", command=lambda: controller.show_page("CurrentGearPage")).pack(side="left", padx=5)
-        self.generate_close = ttk.Button(button_frame, text="Generuoti ir uždaryti", command=self.on_generate_close)
-        self.generate_close.pack(side="left", padx=5)
-        self.generate_new = ttk.Button(button_frame, text="Generuoti ir naujas įrašas", command=self.on_generate_new)
-        self.generate_new.pack(side="left", padx=5)
+            e_code = ttk.Entry(grid, textvariable=code_var, width=20)
+            e_name = ttk.Entry(grid, textvariable=name_var, width=50)
+            e_mon = ttk.Entry(grid, textvariable=months_var, width=20)
+
+            e_code.grid(row=i, column=0, padx=2, pady=2)
+            e_name.grid(row=i, column=1, padx=2, pady=2)
+            e_mon.grid(row=i, column=2, padx=2, pady=2)
+
+            e_code.bind("<KeyRelease>", lambda _ev, idx=i: self.on_code_change(idx))
+
+            self.entries.append({"code": code_var, "name": name_var, "months": months_var})
+
+        btns = ttk.Frame(self)
+        btns.pack(pady=10)
+
+        ttk.Button(btns, text="Atgal", command=lambda: self.app.show_page("CurrentGearPage")).pack(side="left", padx=5)
+        self.btn_gen_new = ttk.Button(btns, text="Generuoti ir naujas įrašas", command=self.on_generate_new)
+        self.btn_gen_new.pack(side="left", padx=5)
+        self.btn_gen_close = ttk.Button(btns, text="Generuoti ir uždaryti", command=self.on_generate_close)
+        self.btn_gen_close.pack(side="left", padx=5)
 
     def refresh(self):
-        for row in self.entries:
-            row["code"].set("")
-            row["name"].set("")
-            row["months"].set("")
+        for r in self.entries:
+            r["code"].set("")
+            r["name"].set("")
+            r["months"].set("")
 
     def on_code_change(self, idx):
         if idx in self.after_ids:
             self.after_cancel(self.after_ids[idx])
-        self.after_ids[idx] = self.after(200, lambda: self.apply_code(idx))
+        self.after_ids[idx] = self.after(120, lambda: self.apply_code(idx))
 
     def apply_code(self, idx):
-        entry = self.entries[idx]
-        code = entry["code"].get().strip()
-        if not code:
-            entry["name"].set("")
-            entry["months"].set("")
+        r = self.entries[idx]
+        raw = r["code"].get().strip()
+        if not raw:
             return
-        if "-" in code:
-            base, size = code.split("-", 1)
+
+        if "-" in raw:
+            base, size = raw.split("-", 1)
         else:
-            base, size = code, ""
+            base, size = raw, ""
+
         base = base.strip()
         size = size.strip()
-        gear_info = self.controller.gear_codes.get(base)
-        if gear_info:
-            name = gear_info.get("name", "")
-            if size:
-                name = f"{name} ({size} dydis)"
-            entry["name"].set(name)
-            entry["months"].set(str(gear_info.get("months", "")))
-        else:
-            entry["name"].set(entry["name"].get())
 
-    def collect_items(self):
+        info = self.app.gear_codes.get(base)
+        if info:
+            name = str(info.get("name", "") or "").strip()
+            months = info.get("months", "")
+            r["name"].set(ensure_size_suffix(name, size))
+            r["months"].set(str(months))
+        else:
+            if size and r["name"].get().strip():
+                r["name"].set(ensure_size_suffix(r["name"].get().strip(), size))
+
+    def collect_items(self) -> list[dict]:
         items = []
-        for row in self.entries:
-            code = row["code"].get().strip()
-            name = row["name"].get().strip()
-            months = row["months"].get().strip()
-            if not code and not name and not months:
+        for r in self.entries:
+            raw = r["code"].get().strip()
+            name = r["name"].get().strip()
+            months = r["months"].get().strip()
+
+            if not raw and not name and not months:
                 continue
-            if "-" in code:
-                base, size = code.split("-", 1)
+
+            if "-" in raw:
+                base, size = raw.split("-", 1)
             else:
-                base, size = code, ""
+                base, size = raw, ""
+
             base = base.strip()
             size = size.strip()
-            final_name = name
-            if size and size not in name:
-                final_name = f"{strip_size_suffix(name)} ({size} dydis)"
+
+            final_name = ensure_size_suffix(name, size)
             try:
-                months_value = int(months)
-            except ValueError:
-                months_value = 0
-            items.append({"code": base, "name": final_name, "months": months_value})
+                m = int(months)
+            except Exception:
+                m = 0
+
+            items.append({"code": base, "name": final_name, "months": m})
         return items
 
-    def update_gear_codes(self, items):
+    def update_gear_codes(self, items: list[dict]):
         updated = False
-        for item in items:
-            base = item["code"]
-            if base and base not in self.controller.gear_codes:
-                self.controller.gear_codes[base] = {
-                    "name": strip_size_suffix(item["name"]),
-                    "months": item["months"],
+        for it in items:
+            base = it["code"]
+            if base and base not in self.app.gear_codes:
+                self.app.gear_codes[base] = {
+                    "name": strip_size_suffix(it["name"]),
+                    "months": it["months"],
                 }
                 updated = True
         if updated:
-            save_gear_codes(self.controller.settings["gear"], self.controller.gear_codes)
+            save_gear_codes(self.app.settings["gear"], self.app.gear_codes)
 
-    def toggle_buttons(self, state):
-        self.generate_close.config(state=state)
-        self.generate_new.config(state=state)
+    def toggle_buttons(self, state: str):
+        self.btn_gen_new.config(state=state)
+        self.btn_gen_close.config(state=state)
 
-    def run_generation(self, close_after):
+    def _do_generate(self, close_after: bool):
+        emp = self.app.current_employee
+        if emp is None:
+            messagebox.showwarning("Klaida", "Nėra pasirinkto darbuotojo.")
+            self.toggle_buttons("normal")
+            return
+
         items = self.collect_items()
         if not items:
             messagebox.showwarning("Trūksta duomenų", "Įveskite bent vieną aprangos eilutę.")
             self.toggle_buttons("normal")
             return
-        employee = self.controller.current_employee
-        document_number = self.controller.get_next_document_number()
-        self.update_gear_codes(items)
-        self.controller.append_issuance_rows(employee, items, document_number)
-        self.controller.generate_word_doc(employee, items, document_number)
-        if close_after:
-            self.controller.destroy()
-        else:
-            self.controller.show_page("EmployeeSelectPage")
-        self.toggle_buttons("normal")
 
-    def on_generate_close(self):
-        self.toggle_buttons("disabled")
-        threading.Thread(target=self.run_generation, args=(True,), daemon=True).start()
+        self.update_gear_codes(items)
+
+        doc_number = self.app.get_next_doc_number()
+        issued_date = self.app.issue_date_for_new_employee or date.today()
+
+        self.app.save_issuance(emp, items, doc_number, issued_date)
+
+        out_path = generate_word(
+            template_path=self.app.settings["template"],
+            outputs_dir=self.app.settings["outputs"],
+            emp=emp,
+            items=items,
+            doc_number=doc_number,
+            issued_date=issued_date
+        )
+
+        if out_path:
+            messagebox.showinfo("Atlikta", f"Sugeneruota:\n{out_path}")
+
+        if close_after:
+            self.app.destroy()
+        else:
+            self.app.show_page("EmployeeSelectPage")
+
+        self.toggle_buttons("normal")
 
     def on_generate_new(self):
         self.toggle_buttons("disabled")
-        threading.Thread(target=self.run_generation, args=(False,), daemon=True).start()
+        threading.Thread(target=self._do_generate, args=(False,), daemon=True).start()
+
+    def on_generate_close(self):
+        self.toggle_buttons("disabled")
+        threading.Thread(target=self._do_generate, args=(True,), daemon=True).start()
 
 
 if __name__ == "__main__":

@@ -1,10 +1,15 @@
 {
-  "Gamyba": [
+  "Nuggets cechas": [
+    "Fasuotojas",
     "Operatorius",
     "Meistras"
   ],
-  "Sandėlis": [
-    "Sandėlininkas",
-    "Krovėjas"
+  "Rūkytų gaminių cechas": [
+    "Operatorius",
+    "Sandėlininkas"
+  ],
+  "Šviežia mėsa": [
+    "Pjaustytojas",
+    "Fasuotojas"
   ]
 }
