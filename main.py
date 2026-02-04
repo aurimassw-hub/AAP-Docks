@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import os
 import threading
@@ -6,8 +5,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk, messagebox
 
+from docx import Document
 from openpyxl import Workbook, load_workbook
 
 
@@ -97,13 +97,6 @@ def load_workplaces(path):
     if isinstance(data, dict):
         return data
     return {}
-
-
-def python_docx_available():
-    return (
-        importlib.util.find_spec("docx") is not None
-        and importlib.util.find_spec("docx.api") is not None
-    )
 
 
 def load_gear_codes(path):
@@ -284,15 +277,6 @@ class AAPApp(tk.Tk):
         workbook.save(self.settings["excel"])
 
     def generate_word_doc(self, employee_info, issued_items, document_number):
-        if not python_docx_available():
-            messagebox.showerror(
-                "Trūksta priklausomybių",
-                "Nepavyko įkelti python-docx. "
-                "Įdiekite paketą 'python-docx' ir pašalinkite paketą 'docx'.",
-            )
-            return
-        from docx import Document
-
         template_path = self.settings["template"]
         output_dir = self.settings["outputs"]
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -671,12 +655,12 @@ class NewGearPage(ttk.Frame):
         gear_info = self.controller.gear_codes.get(base)
         if gear_info:
             name = gear_info.get("name", "")
-            name = ensure_size_suffix(name, size)
+            if size:
+                name = f"{name} ({size} dydis)"
             entry["name"].set(name)
             entry["months"].set(str(gear_info.get("months", "")))
         else:
-            if size:
-                entry["name"].set(ensure_size_suffix(entry["name"].get(), size))
+            entry["name"].set(entry["name"].get())
 
     def collect_items(self):
         items = []
@@ -692,7 +676,9 @@ class NewGearPage(ttk.Frame):
                 base, size = code, ""
             base = base.strip()
             size = size.strip()
-            final_name = ensure_size_suffix(name, size)
+            final_name = name
+            if size and size not in name:
+                final_name = f"{strip_size_suffix(name)} ({size} dydis)"
             try:
                 months_value = int(months)
             except ValueError:
